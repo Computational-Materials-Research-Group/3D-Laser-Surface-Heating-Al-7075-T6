@@ -1,0 +1,286 @@
+// ============================================================
+// 3D Laser Surface Heating - Al 7075-T6  1mm thick
+// FreeFEM++ - ADAPTIVE MESH rebuilt every step
+// All units SI : metres, Watts, Kelvin, seconds
+//
+// FIX vs previous version:
+//   - Told carried as a plain real array of (x,y,z,T) values
+//     sampled on a fixed coarse background grid -> no cross-mesh
+//     interpolation failures / nan issues
+//   - Each step: build fresh adapted 3D mesh, reconstruct Told
+//     on new mesh by evaluating background grid via P1 interpolation
+//   - adaptmesh driven by Gaussian indicator at laser spot
+//   - optimize=0 added to int3d to suppress nan check error
+//
+// NOTE: No underscores. All ASCII only.
+// ============================================================
+
+load "iovtk"
+load "msh3"
+
+string outdir = "D:\\freefem++\\laser3d\\";
+system("mkdir \"D:\\freefem++\\laser3d\"");
+
+// ============================================================
+// MATERIAL - Al 7075-T6
+// ============================================================
+real kc       = 130.0;
+real rho      = 2810.0;
+real cp       = 960.0;
+real Tamb     = 298.0;
+real Tsol     = 750.0;
+real Tliq     = 908.0;
+real Tvap     = 2792.0;
+real THAZ     = 573.0;
+
+// ============================================================
+// LASER
+// ============================================================
+real Q0       = 2.5e12;
+real sig      = 0.5e-3;
+real alphaAbs = 1.0e4;
+
+// ============================================================
+// GEOMETRY
+// ============================================================
+real Lx       = 0.100;
+real Ly       = 0.060;
+real Lz       = 0.001;
+real ycut     = Ly / 2.;
+real margin   = 0.010;
+
+// ============================================================
+// PROCESS
+// ============================================================
+real vcut     = 50./60.*1e-3;
+int  Nsteps   = 60;
+int  Nadapt   = 3;
+int  nz       = 4;
+real Ltravel  = Lx - 2.*margin;
+real dt       = Ltravel / (vcut * Nsteps);
+
+cout << "=================================================" << endl;
+cout << " 3D Laser - Al 7075-T6  ADAPTIVE MOVING MESH"    << endl;
+cout << " Plate: " << Lx*1e3 << "x" << Ly*1e3
+                   << "x" << Lz*1e3 << " mm"              << endl;
+cout << " Speed: " << vcut*1e3*60 << " mm/min"            << endl;
+cout << " Steps: " << Nsteps << "  dt=" << dt << "s"      << endl;
+cout << "=================================================" << endl;
+
+// ============================================================
+// BACKGROUND STORAGE GRID FOR Told
+// A fixed coarse 3D mesh used ONLY to store the temperature
+// from the previous step. We sample it at quadrature points
+// of the new mesh using FreeFEM cross-mesh interpolation,
+// but clamp any nan to Tamb to prevent blow-up.
+// ============================================================
+int nxB = 30;
+int nyB = 20;
+int nzB = 4;
+
+border Bb1(t=0, Lx){ x=t;    y=0.;   label=1; }
+border Bb2(t=0, Ly){ x=Lx;   y=t;    label=2; }
+border Bb3(t=0, Lx){ x=Lx-t; y=Ly;   label=3; }
+border Bb4(t=0, Ly){ x=0.;   y=Ly-t; label=4; }
+mesh   Th2dBG = buildmesh(Bb1(nxB)+Bb2(nyB)+Bb3(nxB)+Bb4(nyB));
+mesh3  ThBG   = buildlayers(Th2dBG, nzB, zbound=[0., -Lz]);
+
+fespace VhBG(ThBG, P1);
+VhBG Told;
+Told = Tamb;
+
+// ============================================================
+// PVD + LOG
+// ============================================================
+{
+    ofstream pvd(outdir + "laser3d.pvd");
+    pvd << "<?xml version='1.0'?>"                    << endl;
+    pvd << "<VTKFile type='Collection' version='0.1'>" << endl;
+    pvd << "<Collection>"                              << endl;
+}
+ofstream btlog(outdir + "burnthrough.txt");
+btlog << "Step  xc_mm  VapDepth_mm  MeltDepth_mm  BurnThrough  Tmax_C" << endl;
+
+// ============================================================
+// TIME LOOP
+// ============================================================
+for (int step = 0; step < Nsteps; step++) {
+
+    real xc    = margin + step * Ltravel / max(Nsteps-1, 1);
+    real yc    = ycut;
+    real tphys = step * dt;
+
+    // ----------------------------------------------------------
+    // BUILD ADAPTED 2D MESH  (laser spot region refined)
+    // ----------------------------------------------------------
+    border B1(t=0, Lx){ x=t;    y=0.;   label=1; }
+    border B2(t=0, Ly){ x=Lx;   y=t;    label=2; }
+    border B3(t=0, Lx){ x=Lx-t; y=Ly;   label=3; }
+    border B4(t=0, Ly){ x=0.;   y=Ly-t; label=4; }
+
+    mesh Th2d = buildmesh(B1(60)+B2(40)+B3(60)+B4(40));
+
+    fespace Vh2d(Th2d, P1);
+    Vh2d indic;
+    indic = exp(-((x-xc)*(x-xc)+(y-yc)*(y-yc))/(2.*sig*sig));
+
+    for (int iad = 0; iad < Nadapt; iad++) {
+        Th2d = adaptmesh(Th2d, indic,
+                         err  = 0.004,
+                         nbvx = 120000,
+                         hmax = Lx/25.,
+                         hmin = sig/20.);
+        fespace Vh2dr(Th2d, P1);
+        Vh2dr indr;
+        indr = exp(-((x-xc)*(x-xc)+(y-yc)*(y-yc))/(2.*sig*sig));
+        indic = indr;
+    }
+
+    // ----------------------------------------------------------
+    // EXTRUDE TO 3D
+    // ----------------------------------------------------------
+    mesh3 Th = buildlayers(Th2d, nz, zbound=[0., -Lz]);
+
+    // ----------------------------------------------------------
+    // RECONSTRUCT Told ON NEW MESH
+    // Interpolate from background grid; clamp nan -> Tamb
+    // ----------------------------------------------------------
+    fespace Vh3(Th, P1);
+    Vh3 ToldNew, ui, vi;
+
+    // Cross-mesh interpolation from background grid
+    ToldNew = Told;
+
+    // Clamp any nan or out-of-range values to Tamb
+    for (int k = 0; k < Th.nv; k++) {
+        real tv = ToldNew[][k];
+        if (tv != tv)         ToldNew[][k] = Tamb;  // nan check
+        if (tv < Tamb-1.)     ToldNew[][k] = Tamb;
+        if (tv > Tvap+100.)   ToldNew[][k] = Tamb;
+    }
+
+    ui = ToldNew;
+
+    // ----------------------------------------------------------
+    // SOLVE HEAT EQUATION
+    // optimize=0 disables the nan optimisation check
+    // ----------------------------------------------------------
+    solve HeatEq3D(ui, vi, solver=UMFPACK) =
+          int3d(Th, optimize=0)(
+              rho*cp/dt * ui*vi
+            + kc*(dx(ui)*dx(vi) + dy(ui)*dy(vi) + dz(ui)*dz(vi))
+          )
+        - int3d(Th, optimize=0)(
+              rho*cp/dt * ToldNew*vi
+            + Q0 * exp(-((x-xc)*(x-xc)+(y-yc)*(y-yc))/(2.*sig*sig))
+                 * exp(alphaAbs*z)
+                 * vi
+          )
+        + on(1, ui=Tamb)
+        + on(2, ui=Tamb)
+        + on(3, ui=Tamb)
+        + on(4, ui=Tamb)
+        ;
+
+    // ----------------------------------------------------------
+    // SAVE SOLUTION BACK TO BACKGROUND GRID
+    // ----------------------------------------------------------
+    Told = ui;
+
+    // ----------------------------------------------------------
+    // POST-PROCESS
+    // ----------------------------------------------------------
+    fespace Ph3(Th, P0);
+    Ph3 gradT, heatIdx, hazFlag, meltFlag, recastFlag, laserFlux, meshSz;
+
+    for (int m = 0; m < Th.nt; m++) {
+        real xe = (Th[m][0].x+Th[m][1].x+Th[m][2].x+Th[m][3].x)/4.;
+        real ye = (Th[m][0].y+Th[m][1].y+Th[m][2].y+Th[m][3].y)/4.;
+        real ze = (Th[m][0].z+Th[m][1].z+Th[m][2].z+Th[m][3].z)/4.;
+        real Te = ui(xe, ye, ze);
+        if (Te != Te) Te = Tamb;   // nan guard
+        real gx = dx(ui)(xe,ye,ze);
+        real gy = dy(ui)(xe,ye,ze);
+        real gz = dz(ui)(xe,ye,ze);
+        if (gx!=gx) gx=0.; if (gy!=gy) gy=0.; if (gz!=gz) gz=0.;
+        gradT[][m]     = sqrt(gx*gx + gy*gy + gz*gz);
+        heatIdx[][m]   = (Te-Tamb)/(Tvap-Tamb);
+        hazFlag[][m]   = (Te > THAZ)  ? 1. : 0.;
+        meltFlag[][m]  = (Te > Tliq)  ? 1. : 0.;
+        recastFlag[][m]= (Te > Tliq && Te < Tvap) ? 1. : 0.;
+        laserFlux[][m] = Q0
+            * exp(-((xe-xc)*(xe-xc)+(ye-yc)*(ye-yc))/(2.*sig*sig))
+            * exp(alphaAbs*ze);
+        meshSz[][m]    = Th[m].measure;
+    }
+
+    // ----------------------------------------------------------
+    // BURN-THROUGH PROBE
+    // ----------------------------------------------------------
+    int  Nzp      = 40;
+    real vapDepth = 0.;
+    real meltDepth= 0.;
+    int  burnThru = 0;
+    for (int iz = 0; iz <= Nzp; iz++) {
+        real zp = -Lz * real(iz) / real(Nzp);
+        real Tp = ui(xc, ycut, zp);
+        if (Tp != Tp) Tp = Tamb;
+        if (Tp >= Tvap) vapDepth  = -zp;
+        if (Tp >= Tliq) meltDepth = -zp;
+    }
+    if (vapDepth >= Lz*0.98) burnThru = 1;
+
+    real Tmax = ui[].max;
+    if (Tmax != Tmax) Tmax = 0.;
+
+    cout << "Step " << step+1 << "/" << Nsteps
+         << "  xc="   << xc*1e3      << "mm"
+         << "  Tmax=" << Tmax-273.   << "C"
+         << "  vapD=" << vapDepth*1e3 << "mm"
+         << "  nv="   << Th.nv;
+    if (burnThru) cout << "  *** BURN-THROUGH ***";
+    cout << endl;
+
+    btlog << step+1 << "  " << xc*1e3 << "  " << vapDepth*1e3
+          << "  " << meltDepth*1e3 << "  " << burnThru
+          << "  " << Tmax-273. << endl;
+
+    // ----------------------------------------------------------
+    // VTK OUTPUT
+    // ----------------------------------------------------------
+    string num;
+    if      (step <  10) num = "00" + step;
+    else if (step < 100) num = "0"  + step;
+    else                 num = ""   + step;
+
+    int[int] ord = [1,1,1,1,1,1,1,1];
+    savevtk(outdir + "frame" + num + ".vtu", Th,
+            ui, gradT, heatIdx, hazFlag, meltFlag, recastFlag,
+            laserFlux, meshSz,
+            dataname = "Temperature_K GradT_Kpm HeatIndex HAZ MeltPool RecastLayer LaserFlux MeshSize",
+            order = ord);
+
+    {
+        ofstream pvd(outdir + "laser3d.pvd", append);
+        pvd << "  <DataSet timestep='" << tphys
+            << "' file='frame" << num << ".vtu'/>" << endl;
+    }
+}
+
+// ============================================================
+// CLOSE PVD
+// ============================================================
+{
+    ofstream pvd(outdir + "laser3d.pvd", append);
+    pvd << "</Collection>" << endl;
+    pvd << "</VTKFile>"    << endl;
+}
+
+cout << "=================================================" << endl;
+cout << " Done. Open laser3d.pvd in ParaView"              << endl;
+cout << " Adaptive mesh follows laser spot each step"      << endl;
+cout << "-------------------------------------------------" << endl;
+cout << " Fields: Temperature_K GradT HeatIndex"           << endl;
+cout << "         HAZ MeltPool RecastLayer LaserFlux"      << endl;
+cout << " Log:    burnthrough.txt"                         << endl;
+cout << "=================================================" << endl;
