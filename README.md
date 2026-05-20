@@ -1,88 +1,170 @@
-# 3D Laser Surface Heating — Al 7075-T6
-### FreeFEM++ Adaptive Moving Mesh Simulation
+# 3D Laser Surface Heating Simulation on Al 7075-T6
 
-![HAZ field showing concentric heat-affected rings around the laser spot](preview.png)
+<p align="center">
+  <img src="https://img.shields.io/badge/FreeFEM++-Simulation-blue?style=for-the-badge&logo=gnu&logoColor=white"/>
+  <img src="https://img.shields.io/badge/Al%207075--T6-Material-orange?style=for-the-badge"/>
+  <img src="https://img.shields.io/badge/3D-Adaptive%20Mesh-red?style=for-the-badge"/>
+  <img src="https://img.shields.io/badge/Beer--Lambert-Laser%20Source-purple?style=for-the-badge"/>
+  <img src="https://img.shields.io/badge/ParaView-VTK%20Export-green?style=for-the-badge"/>
+  <img src="https://img.shields.io/badge/License-MIT-lightgrey?style=for-the-badge"/>
+</p>
+
+<p align="center">
+  A 3D finite element simulation of <b>high-power laser surface heating</b> on a 1 mm thick
+  Al 7075-T6 aerospace sheet using FreeFEM++. The laser travels along the plate centreline
+  and the mesh is <b>rebuilt and adaptively refined around the moving laser spot at every
+  time step</b>. A Beer-Lambert volumetric source models energy deposition through the
+  plate thickness. Results are exported as a <i>dynamic PVD animation</i> for ParaView
+  visualisation with full thermal, HAZ, melt pool, and recast layer fields.
+</p>
+
+![HAZ field showing adaptive mesh refinement around the moving laser spot](preview.png)
 
 ---
-
-## Overview
-
-This repository contains a **FreeFEM++** simulation of a high-power laser traversing a thin aluminium sheet (Al 7075-T6, 1 mm thick). The code solves the **3D transient heat conduction equation** with a moving Gaussian–Beer-Lambert laser source on a fully adaptive tetrahedral mesh that is rebuilt and refined around the laser spot at every time step.
-
-The primary outputs are:
-
-- Full 3D temperature field evolving over time
-- Heat-Affected Zone (HAZ) boundary
-- Melt pool extent (liquid aluminium region)
-- Recast layer (re-solidified melt)
-- Burn-through depth tracking per step
-- Thermal gradient field (residual stress driver)
-
----
-<img width="1008" height="772" alt="laser surf" src="https://github.com/user-attachments/assets/f9f62661-ef16-46eb-a1f4-1506589fb9ea" />
 
 ## Physics
 
-### Governing equation
+The simulation solves a transient 3D heat conduction problem at each laser position,
+capturing the full through-thickness thermal response. Key features include:
 
-```
-rho * cp * dT/dt  -  div( kc * grad(T) )  =  Q(x, y, z, t)
-```
-
-Discretised by **backward Euler** (implicit, unconditionally stable).
-
-### Laser source model
-
-```
-Q(x,y,z,t) = Q0 * exp( -[(x-xc)² + (y-yc)²] / (2·σ²) )
-                * exp( α·z )
-```
-
-| Term | Description |
-|---|---|
-| `Q0` | Peak volumetric power density [W/m³] |
-| `σ` | Gaussian beam sigma (beam radius ≈ 2σ) |
-| `α` | Beer-Lambert absorption depth coefficient [1/m] |
-| `z ∈ [-Lz, 0]` | z=0 is top surface; source decays with depth |
-
-### Boundary conditions
-
-| Face | Condition |
-|---|---|
-| All four side faces | Dirichlet: T = T_amb (large plate assumption) |
-| Top face (z = 0) | Laser source enters via volumetric term |
-| Bottom face (z = −Lz) | Heat conducted through thickness |
+- Transient heat conduction PDE (backward Euler, implicit) with moving volumetric laser source
+- Gaussian beam profile in the x-y plane combined with Beer-Lambert exponential decay in z
+- Adaptive 2D mesh driven by a Gaussian refinement indicator at the current laser position
+- Mesh extruded to 3D tetrahedra via `buildlayers` at every step — mesh follows the laser
+- Previous-step temperature carried on a fixed background grid to avoid cross-mesh NaN failures
+- HAZ, melt pool, recast layer, and vaporisation front tracked per element each step
+- Burn-through detection: vaporisation isotherm probed along the centreline through thickness
+- Real SI units throughout: metres, Watts, Kelvin, seconds
 
 ---
 
-## Material Properties — Al 7075-T6
+## Geometry
 
-| Property | Symbol | Value | Units |
-|---|---|---|---|
+```
+  3D plate (side view, x = travel direction, z = through-thickness):
+
+  z=0   ┌─────────────────────────────────────────────┐  top surface
+        │       laser travels →                        │
+        │   ···●···  (Gaussian beam, sigma=0.5mm)      │
+        │       ↓ Beer-Lambert decay                   │  Ly = 60 mm
+        │                                              │
+  z=-h  └─────────────────────────────────────────────┘  bottom surface
+        x=0                                        x=Lx
+                       Lx = 100 mm
+        plate thickness h = 1 mm
+
+  Top view (x-y plane):
+
+  y=Ly  +─────────────────────────────────────────────+
+        │                                             │
+        │  ···●···  laser spot at y=Ly/2              │
+        │                                             │
+  y=0   +─────────────────────────────────────────────+
+        x=0       margin=10mm          x=100mm
+```
+
+- Boundary labels 1–4 = four side faces (Dirichlet: T = T_amb)
+- Top face (z = 0): laser enters via volumetric source term
+- Bottom face (z = −h): heat conducted through thickness, isothermal at edges
+
+---
+
+## Material Parameters — Al 7075-T6
+
+| Parameter | Symbol | Value | Unit |
+|-----------|--------|-------|------|
 | Thermal conductivity | kc | 130 | W/(m·K) |
-| Density | ρ | 2810 | kg/m³ |
+| Density | rho | 2810 | kg/m³ |
 | Specific heat | cp | 960 | J/(kg·K) |
-| Ambient temperature | T_amb | 298 | K (25 °C) |
-| Solidus | T_sol | 750 | K (477 °C) |
-| Liquidus | T_liq | 908 | K (635 °C) |
-| Vaporisation | T_vap | 2792 | K (2519 °C) |
-| HAZ threshold | T_HAZ | 573 | K (300 °C) |
+| Ambient temperature | Tamb | 298 (25) | K (°C) |
+| Solidus | Tsol | 750 (477) | K (°C) |
+| Liquidus | Tliq | 908 (635) | K (°C) |
+| Vaporisation | Tvap | 2792 (2519) | K (°C) |
+| HAZ threshold | THAZ | 573 (300) | K (°C) |
+
+---
+
+## Laser Parameters
+
+| Parameter | Symbol | Value | Unit |
+|-----------|--------|-------|------|
+| Peak power density | Q0 | 2.5 × 10¹² | W/m³ |
+| Beam sigma | sig | 0.5 | mm |
+| Absorption depth | 1/alphaAbs | 0.1 | mm |
+| Cutting speed | vcut | 50 | mm/min |
+
+---
+
+## Process Parameters
+
+| Parameter | Symbol | Value | Unit |
+|-----------|--------|-------|------|
+| Plate length | Lx | 100 | mm |
+| Plate width | Ly | 60 | mm |
+| Plate thickness | Lz | 1 | mm |
+| Start/end margin | margin | 10 | mm |
+| Time steps | Nsteps | 60 | — |
+| Adapt passes per step | Nadapt | 3 | — |
+| Through-thickness layers | nz | 4 | — |
+| Total animation frames | — | 60 | — |
+
+---
+
+## Governing Equations
+
+### Transient Heat Conduction PDE
+
+```
+rho * cp * dT/dt  -  div( kc * grad(T) )  =  Q(x, y, z, t)    in Omega
+```
+
+Discretised by **backward Euler**:
+
+```
+rho*cp/dt * (T^n - T^{n-1})  -  div( kc * grad(T^n) )  =  Q^n
+```
+
+### Laser Source — Gaussian × Beer-Lambert
+
+```
+Q(x,y,z,t) = Q0 * exp( -[(x-xc)^2 + (y-yc)^2] / (2*sig^2) )
+                * exp( alphaAbs * z )
+
+z in [-Lz, 0]:
+  z = 0    ->  exp(0) = 1.0   (full intensity at top surface)
+  z = -Lz  ->  exp(-alphaAbs*Lz)  (attenuated at bottom face)
+```
+
+### Boundary Conditions
+
+```
+T = Tamb     on labels 1, 2, 3, 4   (all four side faces, large plate)
+```
+
+### Heat Index
+
+```
+HeatIndex = (T - Tamb) / (Tvap - Tamb)
+
+  0.0  ->  ambient (298 K, 25 C)
+  1.0  ->  vaporisation front (2792 K, 2519 C)
+```
 
 ---
 
 ## Adaptive Mesh Strategy
 
-The mesh is **rebuilt every time step** — this is the key feature of the code.
+The mesh is rebuilt and refined **every time step** around the moving laser spot:
 
 ```
-Each step:
-  1. Build coarse 2D background mesh (60×40 elements)
-  2. adaptmesh × Nadapt passes driven by Gaussian indicator at (xc, yc)
-       → fine elements concentrate at the laser spot
-       → coarse elements far from the beam
-  3. buildlayers → extrude adapted 2D mesh to 3D tetrahedra (nz layers)
+Each step N:
+  1. Build coarse 2D background mesh (60x40 elements over plate top face)
+  2. adaptmesh x Nadapt passes using Gaussian indicator centred at (xc, yc)
+       -> fine elements where the beam is intense
+       -> coarse elements far from the spot
+  3. buildlayers -> extrude adapted 2D mesh to 3D tetrahedra (nz layers)
   4. Interpolate T_old from fixed background grid onto new mesh
-       → clamp any NaN to T_amb (robustness guard)
+       -> clamp any NaN values to Tamb (robustness guard)
   5. Solve heat equation on adapted 3D mesh (UMFPACK direct solver)
   6. Save solution back to background grid for next step
 ```
@@ -90,191 +172,210 @@ Each step:
 ### Mesh parameters
 
 | Parameter | Value | Description |
-|---|---|---|
+|-----------|-------|-------------|
 | `Nadapt` | 3 | Adaptation passes per step |
-| `err` | 0.004 | Interpolation error target |
-| `hmin` | σ/20 = 0.025 mm | Finest element near beam centre |
+| `err` | 0.004 | Interpolation error target (tighter = finer) |
+| `hmin` | sig/20 = 0.025 mm | Finest element near beam centre |
 | `hmax` | Lx/25 = 4 mm | Coarsest element far from beam |
 | `nbvx` | 120 000 | Max vertices in adapted 2D mesh |
 | `nz` | 4 | Through-thickness layers |
 
 ---
 
-## Process Parameters
+## Numerical Method
 
-| Parameter | Symbol | Value | Units |
-|---|---|---|---|
-| Cutting speed | v_cut | 50 | mm/min |
-| Peak power density | Q0 | 2.5 × 10¹² | W/m³ |
-| Beam sigma | σ | 0.5 | mm |
-| Absorption depth | 1/α | 0.1 | mm |
-| Time steps | Nsteps | 60 | — |
-
----
-
-## Geometry
-
-```
-        z=0  ┌─────────────────────────────────┐  top surface
-             │         laser travels →          │
-             │    ···●···                       │
-             │                                  │  Ly = 60 mm
-        z=-h └─────────────────────────────────┘  bottom surface
-             x=0                             x=Lx
-                       Lx = 100 mm
-             plate thickness h = 1 mm
-```
-
-The laser travels along `y = Ly/2` (plate centreline) from `x = margin` to `x = Lx − margin`.
+| Aspect | Choice |
+|--------|--------|
+| Spatial discretisation | Finite Element Method (FEM) |
+| Element type | P1 (linear nodal, 3D) |
+| Time integration | Backward Euler (implicit) |
+| Linear solver | UMFPACK (direct sparse) |
+| Adaptive refinement | `adaptmesh`, err=0.004, nbvx=120000 |
+| Mesh per step | Rebuilt from scratch + adapted each step |
+| Adaptivity iterations | 3 per step (Nadapt=3) |
+| Told storage | Fixed coarse background grid (NaN-safe) |
+| NaN guard | `optimize=0` on `int3d` + node-level clamp |
 
 ---
 
-## Output Files
+## Output Fields
 
-All results are saved to `D:\freefem++\laser3d\` (configurable at top of script).
+Each `.vtu` frame contains the following fields:
 
-| File | Description |
-|---|---|
-| `laser3d.pvd` | ParaView time collection — open this file |
-| `frame000.vtu` … `frame059.vtu` | One VTU frame per time step |
-| `burnthrough.txt` | Per-step burn-through depth log |
-
-### Fields in each VTU frame
-
-| Field name | Type | Description |
-|---|---|---|
-| `Temperature_K` | P1 nodal | Absolute temperature [K] |
-| `GradT_Kpm` | P0 element | Thermal gradient magnitude [K/m] |
-| `HeatIndex` | P0 element | (T − T_amb)/(T_vap − T_amb), 0→1 |
-| `HAZ` | P0 element | 1 where T > 300 °C |
-| `MeltPool` | P0 element | 1 where T > 635 °C (liquid Al) |
-| `RecastLayer` | P0 element | 1 where 635 °C < T < 2519 °C |
-| `LaserFlux` | P0 element | Volumetric source Q [W/m³] |
-| `MeshSize` | P0 element | Tetrahedron volume [m³] (shows refinement) |
-
-### Burn-through log format
-
-```
-Step  xc_mm  VapDepth_mm  MeltDepth_mm  BurnThrough  Tmax_C
-1     10.13  0.00         0.00          0            1842.3
-...
-```
-
-`BurnThrough = 1` when the vaporisation isotherm reaches the bottom face (z = −Lz).
+| Field | Type | Description | Units |
+|-------|------|-------------|-------|
+| `Temperature_K` | P1 nodal | Absolute temperature | K |
+| `GradT_Kpm` | P0 element | Thermal gradient magnitude | K/m |
+| `HeatIndex` | P0 element | (T−Tamb)/(Tvap−Tamb), 0=cold 1=vap front | — |
+| `HAZ` | P0 element | 1 where T > 300 °C | — |
+| `MeltPool` | P0 element | 1 where T > 635 °C (liquid Al) | — |
+| `RecastLayer` | P0 element | 1 where 635 °C < T < 2519 °C | — |
+| `LaserFlux` | P0 element | Volumetric source Q(x,y,z) | W/m³ |
+| `MeshSize` | P0 element | Tetrahedron measure (shows refinement) | m³ |
 
 ---
 
-## Requirements
+## Repository Structure
 
-| Software | Version | Notes |
-|---|---|---|
-| FreeFEM++ | ≥ 4.10 | [freefem.org](https://freefem.org) |
-| ParaView | ≥ 5.10 | For visualisation |
-
-FreeFEM++ plugins used (loaded automatically):
-
-```freefem
-load "iovtk"   // VTK/VTU file output
-load "msh3"    // 3D mesh (buildlayers, mesh3 type)
 ```
-
-No external libraries required.
+laser3d/
+|
+|-- laser_cutting_3d.edp          # Main FreeFEM++ simulation script
+|-- README.md                     # This file
+|
+|-- D:\freefem++\laser3d\         # Output directory (auto-created)
+    |-- laser3d.pvd               # Master animation (open in ParaView)
+    |-- frame000.vtu              # Frame 0  (step 1)
+    |-- frame001.vtu              # Frame 1
+    |-- ...
+    |-- frame059.vtu              # Frame 59 (step 60)
+    |-- burnthrough.txt           # Per-step burn-through depth log
+```
 
 ---
 
 ## How to Run
 
-### Windows
-```bat
-FreeFem++.exe laser_cutting_3d.edp
-```
+### Requirements
 
-### Linux / macOS
+- FreeFEM++ v4.10 or later: https://freefem.org
+- ParaView v5.x or later: https://www.paraview.org
+
+### Step 1 — Run the simulation
+
 ```bash
 FreeFem++ laser_cutting_3d.edp
 ```
 
-### Output location
-Change the output directory at the top of the script:
-```freefem
-string outdir = "D:\\freefem++\\laser3d\\";   // Windows
-// string outdir = "/home/user/laser3d/";      // Linux/macOS
+The script will:
+1. Print material and process parameters to console
+2. For each of 60 steps: rebuild and adapt the 3D mesh around the laser spot
+3. Solve the transient heat equation and extract all post-processing fields
+4. Save one VTU per frame and append to master PVD file
+5. Print per-frame progress including Tmax, vaporisation depth, and burn-through flag
+
+Console output example:
 ```
+=================================================
+ 3D Laser - Al 7075-T6  ADAPTIVE MOVING MESH
+ Plate: 100x60x1 mm
+ Speed: 50 mm/min
+ Steps: 60  dt=1.6s
+=================================================
+Step 1/60  xc=10.00mm  Tmax=2418.3C  vapD=0.00mm  nv=4821
+Step 2/60  xc=11.36mm  Tmax=2561.7C  vapD=0.62mm  nv=5104
+Step 3/60  xc=12.71mm  Tmax=2748.1C  vapD=0.89mm  nv=5237
+...
+Step 18/60 xc=30.2mm   Tmax=2804.3C  vapD=1.00mm  nv=5318  *** BURN-THROUGH ***
+```
+
+### Step 2 — Open in ParaView
+
+1. `File > Open` → navigate to `D:\freefem++\laser3d\`
+2. Change Files of type to `All Files (*.*)`
+3. Select `laser3d.pvd` → OK
+4. Choose PVD Reader when prompted → OK
+5. Click `Apply`
+6. Set colour field to `Temperature_K`
+7. Click `Rescale to Data Range Over All Timesteps`
+
+### Step 3 — Visualise the thermal fields
+
+**Option A — Temperature with phase boundaries**
+```
+Color by Temperature_K
+Filters > Contour > Value = 750    (solidus, 477 C)
+Filters > Contour > Value = 908    (liquidus, 635 C)
+Filters > Contour > Value = 2792   (vaporisation front)
+Press Play
+-> Watch melt pool and vap front evolve as laser traverses plate
+```
+
+**Option B — HAZ evolution**
+```
+Color by HAZ  (binary: 0 or 1)
+-> 1 = microstructure permanently altered (T > 300 C)
+-> HAZ zone grows and persists behind laser as it travels
+```
+
+**Option C — Melt pool and recast layer**
+```
+Color by MeltPool   -> liquid Al region (T > 635 C)
+Color by RecastLayer -> re-solidified melt (635 C < T < 2519 C)
+-> Recast layer appears on kerf walls where melt re-solidifies
+```
+
+**Option D — Through-thickness profile**
+```
+Filters > Slice > Normal = (0,1,0), Origin = (xc, 0.030, -0.0005)
+Color by Temperature_K
+-> Cross-section at cut centreline shows Beer-Lambert depth gradient
+-> Melt pool depth visible directly
+```
+
+**Option E — Adaptive mesh quality**
+```
+Color by MeshSize
+-> Fine (dark blue) elements concentrated at laser spot
+-> Watch the fine-mesh zone travel with the laser each frame
+```
+
+Press `Play` to watch all 60 frames of laser traversal with moving adaptive mesh.
 
 ---
 
-## Visualisation in ParaView
+## What to Look for in Results
 
-1. **File → Open** → select `laser3d.pvd` → click **Apply**
-2. Change colouring to `Temperature_K` → **Rescale to Data Range**
-3. Press **Play** to animate the laser traversal
-4. Recommended views:
+### Beer-Lambert Depth Profile
+The laser intensity decays exponentially with depth (absorption depth = 0.1 mm for Al
+at 1 µm wavelength). The `Temperature_K` cross-section slice shows peak temperature
+at the surface dropping to near-ambient within ~0.3–0.5 mm depth. This is physically
+realistic for a focused fibre laser on aluminium.
 
-| What to see | How |
-|---|---|
-| HAZ rings on surface | Colour by `HAZ`, view from above (+Z) |
-| Melt pool depth | **Filters → Clip** along Y axis at centreline |
-| Through-thickness profile | **Filters → Slice** at x = current laser position |
-| Mesh refinement moving | Colour by `MeshSize`, play animation |
-| Burn-through moment | Watch `burnthrough.txt` or threshold `HeatIndex > 0.99` |
+### Adaptive Mesh Following the Laser
+The `MeshSize` field visualises the mesh — finest elements (dark blue, ~0.025 mm)
+are always at the current laser position, coarsening to ~4 mm at the plate edges.
+In ParaView animation this looks like a spotlight of fine mesh tracking the beam.
 
----
+### HAZ Growth Behind the Laser
+The `HAZ` field accumulates behind the laser as it travels. Earlier positions that
+were heated above 300 °C remain flagged. The HAZ width reflects the beam sigma
+and travel speed — faster cutting = narrower HAZ.
 
-## Known Limitations
-
-| Limitation | Physical meaning |
-|---|---|
-| No material removal | True laser cutting requires a moving domain (Stefan problem). This model keeps the mesh intact — it is a **surface heating / scribing** model, not a through-cut. |
-| No melt ejection | Assist gas dynamics (N₂/O₂ jet) are not modelled |
-| No latent heat | Phase-change energy (fusion/vaporisation) is not included — temperatures near T_vap are overestimated |
-| 2D in-plane adaptivity only | The `adaptmesh` call refines the 2D base mesh; through-thickness resolution is uniform (`nz` layers) |
-| Cold start each step | `T_old` is carried via a coarse background grid; some thermal history accuracy is lost between steps |
+### Burn-Through Moment
+When the vaporisation isotherm reaches z = −1 mm (bottom face), the console prints
+`*** BURN-THROUGH ***` and `burnthrough.txt` records `BurnThrough=1`. In ParaView,
+threshold on `HeatIndex > 0.99` to see the vap-front isosurface approaching the
+bottom face.
 
 ---
 
-## Extending the Code
+## Common Errors and Fixes
 
-### Change material
-Replace the material block at the top. Ensure all temperatures (T_sol, T_liq, T_vap, T_HAZ) are updated.
-
-### Change laser power
-```freefem
-real Q0 = 5.0e12;   // increase for deeper penetration
-```
-
-### Finer through-thickness resolution
-```freefem
-int nz = 8;   // 8 layers instead of 4 -> 0.125 mm per layer
-```
-
-### Slower/faster cutting
-```freefem
-real vcut = 100./60.*1e-3;   // 100 mm/min
-```
-
-### Adapt mesh more aggressively
-```freefem
-int  Nadapt = 4;       // more passes
-real err    = 0.002;   // tighter error target
-real hmin   = sig/30.; // finer minimum element
-```
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `syntax error before token _` | Underscore in identifier | Use camelCase: `alphaAbs` not `alpha_abs` |
+| `nan != nan diff nan` | Cross-mesh interpolation returns NaN | `optimize=0` on `int3d` + node-level NaN clamp |
+| `Assertion fail nrfmid` | `buildlayers` label arrays wrong size | Remove `labelmid/labelup/labeldown`; use simple 4-arg form |
+| `No operator .volume` | `.volume` not valid on `mesh3` elements | Use `.measure` instead |
+| All frames same temperature | `Told` not updating | Ensure `Told = ui` executes inside the time loop |
+| Mesh too coarse near spot | `err` too large or `nbvx` too low | Set `err=0.004`, `nbvx=120000`, `hmin=sig/20` |
+| Non-ASCII compile error | UTF-8 dash or accented char in string | Use only 7-bit ASCII in all string literals |
 
 ---
 
-## File Structure
+## Extending the Model
 
-```
-.
-├── laser_cutting_3d.edp    # Main FreeFEM++ script
-├── README.md               # This file
-└── results/                # Created automatically on first run
-    ├── laser3d.pvd         # ParaView collection file
-    ├── frame000.vtu        # Time step 0
-    ├── frame001.vtu        # Time step 1
-    │   ...
-    ├── frame059.vtu        # Time step 59
-    └── burnthrough.txt     # Depth tracking log
-```
+| Extension | What to change |
+|-----------|----------------|
+| Different material | Update kc, rho, cp, Tsol, Tliq, Tvap, THAZ |
+| Higher power / deeper cut | Increase Q0; raise alphaAbs for shallower absorption |
+| Faster travel | Increase vcut; dt updates automatically |
+| Finer mesh near spot | Decrease err to 0.002, hmin to sig/30 |
+| More through-thickness resolution | Increase nz to 8 (0.125 mm/layer) |
+| Persistent thermal history | Use a finer background grid (increase nxB, nyB, nzB) |
+| Convective surface cooling | Add Robin BC on top/bottom faces via `int2d` |
+| Curved cut path | Parameterise xc, yc as functions of step index |
 
 ---
 
@@ -283,7 +384,7 @@ real hmin   = sig/30.; // finer minimum element
 If you use this code in your research, please cite:
 
 ```bibtex
-@software{mishra2026laser,
+@software{mishra2026laser3d,
   author    = {Mishra, A.},
   title     = {3D Laser Surface Heating},
   year      = {2026},
@@ -293,16 +394,40 @@ If you use this code in your research, please cite:
 }
 ```
 
-**APA:**
-> Mishra, A. (2026). *3D Laser Surface Heating*. Zenodo. https://doi.org/10.5281/zenodo.20306950
+Plain text citation:
 
-**Chicago:**
-> Mishra, A. 2026. "3D Laser Surface Heating." Zenodo. https://doi.org/10.5281/zenodo.20306950
+> Mishra, A. (2026). *3D Laser Surface Heating*. Zenodo. https://doi.org/10.5281/zenodo.20306950
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20306950.svg)](https://doi.org/10.5281/zenodo.20306950)
 
 ---
 
+## Author
+
+**akshansh11**
+GitHub: https://github.com/akshansh11
+
+---
+
 ## License
 
-MIT License — free to use, modify, and distribute with attribution.
+<p>
+<a rel="license" href="http://creativecommons.org/licenses/by-nc/4.0/">
+<img alt="Creative Commons Licence" style="border-width:0" src="https://i.creativecommons.org/l/by-nc/4.0/88x31.png"/>
+</a>
+<br/>
+This work is licensed under a
+<a rel="license" href="http://creativecommons.org/licenses/by-nc/4.0/">Creative Commons Attribution-NonCommercial 4.0 International License</a>.
+</p>
+
+You are free to:
+
+- **Share** — copy and redistribute the material in any medium or format
+- **Adapt** — remix, transform, and build upon the material
+
+Under the following terms:
+
+- **Attribution** — You must give appropriate credit to akshansh11 and provide a link to this repository
+- **NonCommercial** — You may not use the material for commercial purposes
+
+Copyright 2026 akshansh11. All rights reserved for commercial use.
