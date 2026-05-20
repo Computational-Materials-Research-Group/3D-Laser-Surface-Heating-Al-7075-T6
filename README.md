@@ -18,7 +18,8 @@
   visualisation with full thermal, HAZ, melt pool, and recast layer fields.
 </p>
 
-![HAZ field showing adaptive mesh refinement around the moving laser spot](preview.png)
+<img width="1008" height="772" alt="laser surf" src="https://github.com/user-attachments/assets/b30026e7-9aec-4770-bf95-2bb105ef85fe" />
+
 
 ---
 
